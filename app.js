@@ -112,6 +112,13 @@
     turnsInCurrentRound: 0,
     actionHistory: [], // actions in the current hand
 
+    // All-In State
+    isAllInActive: false,
+    allInInitiatorId: null,
+    allInInitiatorName: null,
+    allInTargetBet: 0,
+    allInPendingPlayerIds: [],
+
     // Undo Stack
     undoStack: []
   };
@@ -133,7 +140,12 @@
         roundNumber: state.roundNumber,
         currentTurnIndex: state.currentTurnIndex,
         turnsInCurrentRound: state.turnsInCurrentRound,
-        actionHistory: state.actionHistory
+        actionHistory: state.actionHistory,
+        isAllInActive: state.isAllInActive,
+        allInInitiatorId: state.allInInitiatorId,
+        allInInitiatorName: state.allInInitiatorName,
+        allInTargetBet: state.allInTargetBet,
+        allInPendingPlayerIds: state.allInPendingPlayerIds
       };
       localStorage.setItem(STORAGE_KEY, JSON.stringify(serializable));
     } catch (e) {
@@ -158,6 +170,11 @@
       state.currentTurnIndex = data.currentTurnIndex || 0;
       state.turnsInCurrentRound = data.turnsInCurrentRound || 0;
       state.actionHistory = data.actionHistory || [];
+      state.isAllInActive = data.isAllInActive || false;
+      state.allInInitiatorId = data.allInInitiatorId || null;
+      state.allInInitiatorName = data.allInInitiatorName || null;
+      state.allInTargetBet = data.allInTargetBet || 0;
+      state.allInPendingPlayerIds = data.allInPendingPlayerIds || [];
       return true;
     } catch (e) {
       console.warn('Could not restore state from storage', e);
@@ -177,6 +194,11 @@
       roundNumber: state.roundNumber,
       currentTurnIndex: state.currentTurnIndex,
       turnsInCurrentRound: state.turnsInCurrentRound,
+      isAllInActive: state.isAllInActive,
+      allInInitiatorId: state.allInInitiatorId,
+      allInInitiatorName: state.allInInitiatorName,
+      allInTargetBet: state.allInTargetBet,
+      allInPendingPlayerIds: [...(state.allInPendingPlayerIds || [])],
       players: JSON.parse(JSON.stringify(state.players)),
       actionHistory: JSON.parse(JSON.stringify(state.actionHistory))
     };
@@ -200,6 +222,11 @@
     state.roundNumber = snapshot.roundNumber;
     state.currentTurnIndex = snapshot.currentTurnIndex;
     state.turnsInCurrentRound = snapshot.turnsInCurrentRound;
+    state.isAllInActive = snapshot.isAllInActive || false;
+    state.allInInitiatorId = snapshot.allInInitiatorId || null;
+    state.allInInitiatorName = snapshot.allInInitiatorName || null;
+    state.allInTargetBet = snapshot.allInTargetBet || 0;
+    state.allInPendingPlayerIds = snapshot.allInPendingPlayerIds || [];
     state.players = snapshot.players;
     state.actionHistory = snapshot.actionHistory;
 
@@ -257,6 +284,13 @@
     if (explicitFirstPlayerIndex !== null) {
       state.dealerIndex = (explicitFirstPlayerIndex - 1 + state.players.length) % state.players.length;
     }
+
+    // Reset All-In state
+    state.isAllInActive = false;
+    state.allInInitiatorId = null;
+    state.allInInitiatorName = null;
+    state.allInTargetBet = 0;
+    state.allInPendingPlayerIds = [];
 
     // Auto-deduct boot/ante from all players with chips
     const boot = state.config.bootAmount;
@@ -357,10 +391,126 @@
 
     const active = getActivePlayers();
     if (active.length === 1) {
+      state.isAllInActive = false;
       handleSinglePlayerWin(active[0]);
-    } else {
-      advanceTurn();
+      return;
     }
+
+    // If an All-In round is active:
+    if (state.isAllInActive) {
+      // Remove folded player from pending list
+      state.allInPendingPlayerIds = state.allInPendingPlayerIds.filter(id => id !== player.id);
+
+      // Check if all active players have responded to the All-In
+      if (state.allInPendingPlayerIds.length === 0) {
+        const remainingActive = getActivePlayers();
+        if (remainingActive.length === 1) {
+          state.isAllInActive = false;
+          handleSinglePlayerWin(remainingActive[0]);
+        } else {
+          logAction(`🏁 All active players have responded to All-In. Final Showdown!`, 'round-entry');
+          state.isAllInActive = false;
+          triggerShowdown();
+        }
+        return;
+      }
+
+      state.currentTurnIndex = getNextActivePlayerIndex(state.currentTurnIndex);
+      sound.playTurnBell();
+      renderAll();
+      saveStateToStorage();
+      return;
+    }
+
+    advanceTurn();
+  }
+
+  /**
+   * All-In Action: Player pushes their entire remaining bankroll.
+   * Locks all subsequent players into strictly two options: PACK or CALL ALL-IN.
+   * Once all remaining active players respond, no further rounds occur—Showdown is triggered!
+   */
+  function handleAllIn() {
+    if (!state.isHandActive || state.isAllInActive) return;
+    const player = state.players[state.currentTurnIndex];
+    if (player.chips <= 0) return;
+
+    pushUndoSnapshot(`${player.name} went ALL-IN`);
+
+    const pushAmount = player.chips;
+    player.chips = 0;
+    player.currentHandBet += pushAmount;
+    state.pot += pushAmount;
+
+    state.isAllInActive = true;
+    state.allInInitiatorId = player.id;
+    state.allInInitiatorName = player.name;
+    state.allInTargetBet = player.currentHandBet;
+
+    // Remaining active players who must respond (either Pack or Call All-In)
+    const pending = state.players.filter(p => !p.isFolded && p.id !== player.id);
+    state.allInPendingPlayerIds = pending.map(p => p.id);
+
+    logAction(`🔥 ${player.name} went ALL-IN (+${pushAmount} chips, total bet ${player.currentHandBet})! All remaining players must Call All-In or Pack.`, 'chaal-entry');
+    sound.playTone(600, 'triangle', 0.25, 0.2);
+    setTimeout(() => sound.playTone(900, 'triangle', 0.35, 0.2), 120);
+
+    animatePotPop();
+
+    if (state.allInPendingPlayerIds.length === 0) {
+      handleSinglePlayerWin(player);
+      return;
+    }
+
+    // Advance to next active player
+    state.currentTurnIndex = getNextActivePlayerIndex(state.currentTurnIndex);
+    sound.playTurnBell();
+    renderAll();
+    saveStateToStorage();
+  }
+
+  /**
+   * Call All-In: Matches the All-In target bet
+   */
+  function handleCallAllIn() {
+    if (!state.isHandActive || !state.isAllInActive) return;
+    const player = state.players[state.currentTurnIndex];
+
+    pushUndoSnapshot(`${player.name} Called ALL-IN`);
+
+    const diff = Math.max(0, state.allInTargetBet - player.currentHandBet);
+    const actualCall = Math.min(player.chips, diff);
+
+    player.chips -= actualCall;
+    player.currentHandBet += actualCall;
+    state.pot += actualCall;
+
+    logAction(`⚡ ${player.name} called ALL-IN (-${actualCall} chips, total bet ${player.currentHandBet})`, 'chaal-entry');
+    sound.playChipSound();
+    animatePotPop();
+
+    // Remove player from pending list
+    state.allInPendingPlayerIds = state.allInPendingPlayerIds.filter(id => id !== player.id);
+
+    // If all players have responded, the hand strictly finishes with Showdown!
+    if (state.allInPendingPlayerIds.length === 0) {
+      const active = getActivePlayers();
+      if (active.length === 1) {
+        state.isAllInActive = false;
+        handleSinglePlayerWin(active[0]);
+      } else {
+        logAction(`🏁 All active players have responded to All-In. Concluding final round with Showdown!`, 'round-entry');
+        state.isAllInActive = false;
+        triggerShowdown();
+      }
+      return;
+    }
+
+    // Advance to next active player
+    state.currentTurnIndex = getNextActivePlayerIndex(state.currentTurnIndex);
+    sound.playTurnBell();
+    renderAll();
+    saveStateToStorage();
   }
 
   /**
@@ -482,6 +632,11 @@
     winner.chips += potWon;
     winner.handsWon++;
     state.isHandActive = false;
+    state.isAllInActive = false;
+    state.allInInitiatorId = null;
+    state.allInInitiatorName = null;
+    state.allInTargetBet = 0;
+    state.allInPendingPlayerIds = [];
 
     // Record session hand
     state.sessionHistory.push({
@@ -565,6 +720,11 @@
     const bannerText = document.getElementById('turnBannerText');
     if (!state.isHandActive) {
       bannerText.textContent = 'Hand complete. Deal to start next hand!';
+    } else if (state.isAllInActive) {
+      const activePlayer = state.players[state.currentTurnIndex];
+      const diff = Math.max(0, state.allInTargetBet - activePlayer.currentHandBet);
+      const callAmount = Math.min(activePlayer.chips, diff);
+      bannerText.innerHTML = `🔥 <strong style="color: #f87171;">ALL-IN ROUND:</strong> ${activePlayer.name}'s Turn (Must <strong>PACK</strong> or <strong>CALL +${callAmount} CHIPS</strong>)`;
     } else {
       const activePlayer = state.players[state.currentTurnIndex];
       const req = getRequiredBet(state.currentTurnIndex);
@@ -663,6 +823,8 @@
       let statusBadge = '';
       if (p.isFolded) {
         statusBadge = `<span class="pod-status-badge badge-folded">Folded</span>`;
+      } else if (state.isHandActive && p.chips === 0 && p.currentHandBet > 0) {
+        statusBadge = `<span class="pod-status-badge badge-allin">ALL-IN</span>`;
       } else if (p.isBlind) {
         statusBadge = `<span class="pod-status-badge badge-blind">Blind</span>`;
       } else {
@@ -701,9 +863,9 @@
         </div>
       `;
 
-      // Clicking on a pod allows looking at cards if it's their turn and they are blind
+      // Clicking on a pod allows looking at cards if it's their turn and they are blind (not during All-In)
       pod.addEventListener('click', () => {
-        if (state.isHandActive && index === state.currentTurnIndex && !p.isFolded && p.isBlind) {
+        if (state.isHandActive && !state.isAllInActive && index === state.currentTurnIndex && !p.isFolded && p.isBlind) {
           handleSeeCards();
         }
       });
@@ -751,10 +913,55 @@
     dockStatus.textContent = player.isBlind ? 'Blind' : 'Seen (Chaal)';
     dockStatus.className = `badge ${player.isBlind ? 'badge-blind' : 'badge-seen'}`;
 
-    // See Cards button: Once seen, cannot un-see cards
+    const btnFold = document.getElementById('btnFold');
     const btnToggleSeen = document.getElementById('btnToggleSeen');
     const btnToggleSeenTop = document.getElementById('btnToggleSeenTop');
     const btnToggleSeenSub = document.getElementById('btnToggleSeenSub');
+    const btnCall = document.getElementById('btnCall');
+    const btnCallTop = document.getElementById('btnCallTop');
+    const btnCallSub = document.getElementById('btnCallSub');
+    const btnAllIn = document.getElementById('btnAllIn');
+    const btnAllInSub = document.getElementById('btnAllInSub');
+    const btnCallAllIn = document.getElementById('btnCallAllIn');
+    const btnCallAllInSub = document.getElementById('btnCallAllInSub');
+    const topupGroup = document.getElementById('topupActionGroup');
+    const raiseGroup = document.querySelector('.raise-group');
+    const btnShow = document.getElementById('btnShow');
+
+    // If All-In is active, user requested ONLY TWO buttons: PACK or CALL ALL-IN!
+    if (state.isAllInActive) {
+      btnFold.style.display = 'inline-flex';
+      btnCallAllIn.style.display = 'inline-flex';
+
+      btnToggleSeen.style.display = 'none';
+      btnCall.style.display = 'none';
+      if (btnAllIn) btnAllIn.style.display = 'none';
+      if (raiseGroup) raiseGroup.style.display = 'none';
+      if (topupGroup) topupGroup.style.display = 'none';
+      if (btnShow) btnShow.style.display = 'none';
+
+      const diff = Math.max(0, state.allInTargetBet - player.currentHandBet);
+      const callAmount = Math.min(player.chips, diff);
+      btnCallAllInSub.textContent = `+${callAmount} Chips`;
+      btnCallAllIn.disabled = false;
+      return;
+    }
+
+    // Normal Betting Mode
+    btnFold.style.display = 'inline-flex';
+    btnCallAllIn.style.display = 'none';
+    btnCall.style.display = 'inline-flex';
+    if (raiseGroup) raiseGroup.style.display = 'flex';
+    if (btnShow) btnShow.style.display = 'inline-flex';
+
+    // All-In Button
+    if (btnAllIn) {
+      btnAllIn.style.display = 'inline-flex';
+      btnAllIn.disabled = player.chips <= 0;
+      btnAllInSub.textContent = player.chips > 0 ? `+${player.chips} Chips` : '0 Chips';
+    }
+
+    // See Cards button: Once seen, cannot un-see cards
     if (player.isBlind) {
       btnToggleSeen.style.display = 'inline-flex';
       btnToggleSeenTop.textContent = 'SEE CARDS';
@@ -767,11 +974,6 @@
     // Call / Chaal / Blind button & Insufficient Bankroll Top-Up Logic
     const reqBet = getRequiredBet(state.currentTurnIndex);
     const hasEnoughChips = player.chips >= reqBet;
-    const btnCall = document.getElementById('btnCall');
-    const btnCallTop = document.getElementById('btnCallTop');
-    const btnCallSub = document.getElementById('btnCallSub');
-    const topupGroup = document.getElementById('topupActionGroup');
-    const raiseGroup = document.querySelector('.raise-group');
 
     if (!hasEnoughChips) {
       // Player does not have enough bankroll to take the Chaal!
@@ -809,7 +1011,6 @@
     // Show button condition:
     // Can show when only 2 players remain or in round 3
     const activePlayers = getActivePlayers();
-    const btnShow = document.getElementById('btnShow');
     if (activePlayers.length <= 2 || state.roundNumber >= state.config.maxRounds) {
       btnShow.disabled = false;
       document.getElementById('btnShowSub').textContent = `Showdown (${activePlayers.length} left)`;
@@ -1241,6 +1442,8 @@
     document.getElementById('btnFold').addEventListener('click', handleFold);
     document.getElementById('btnToggleSeen').addEventListener('click', handleSeeCards);
     document.getElementById('btnCall').addEventListener('click', handleCall);
+    document.getElementById('btnAllIn').addEventListener('click', handleAllIn);
+    document.getElementById('btnCallAllIn').addEventListener('click', handleCallAllIn);
     document.getElementById('btnRaiseCustom').addEventListener('click', openRaiseModal);
     document.getElementById('btnShow').addEventListener('click', triggerShowdown);
 
@@ -1307,17 +1510,23 @@
       if (document.querySelector('.modal-backdrop[style*="display: flex"]')) return;
 
       if (e.key === ' ' || e.key === 'c' || e.key === 'C') {
-        // Space or C = Call / Chaal
+        // Space or C = Call / Chaal / Call All-In
         e.preventDefault();
-        if (state.isHandActive) handleCall();
+        if (state.isHandActive) {
+          if (state.isAllInActive) {
+            handleCallAllIn();
+          } else {
+            handleCall();
+          }
+        }
       } else if (e.key === 'f' || e.key === 'F') {
-        // F = Fold
+        // F = Fold / Pack
         e.preventDefault();
         if (state.isHandActive) handleFold();
       } else if (e.key === 's' || e.key === 'S') {
-        // S = See cards (only if blind)
+        // S = See cards (only if blind and NOT during All-In)
         e.preventDefault();
-        if (state.isHandActive && state.players[state.currentTurnIndex].isBlind) {
+        if (state.isHandActive && !state.isAllInActive && state.players[state.currentTurnIndex].isBlind) {
           handleSeeCards();
         }
       } else if (e.key === 'z' && (e.ctrlKey || e.metaKey)) {

@@ -54,17 +54,25 @@ This app is 100% static HTML5/CSS/JS, making it ideal for Vercel, Netlify, or Gi
      - Players can also add chips at any time by clicking their chip box on their table pod.
    - **Pack / Fold:** Exits the player from the current hand with zero further deductions.
 
-5. **Round Limit & Showdown:**
-   - Hand tracks betting rounds up to **3 rounds maximum**.
+5. **🔥 All-In Mode & Final Showdown Rule:**
+   - Any active player on their turn can click **"🔥 ALL IN"** to push their entire remaining bankroll into the pot.
+   - **Two Options Only for Next Players:** Once an All-In is initiated, all subsequent active players at the table are strictly presented with **two choices**:
+     1. **PACK:** Fold the hand.
+     2. **⚡ CALL ALL-IN:** Match the All-In bet (deducts exact difference needed to match the All-In initiator's total hand contribution).
+     *(All other actions—Raise, See Cards, Normal Chaal—are disabled and hidden during the All-In round).*
+   - **Strictly Final Round:** The action circulates until all remaining players have either folded or called the All-In. Once everyone has responded, **no further betting rounds occur**—the hand immediately concludes with the **Showdown** to select the winner.
+
+6. **Round Limit & Showdown:**
+   - Hand tracks betting rounds up to **3 rounds maximum** (or ends early if All-In is triggered or 1 player remains).
    - **Showdown:** Becomes available when only 2 players remain or at the end of Round 3.
    - If all players except one fold, the remaining player automatically wins the pot.
 
-6. **Winner Pot Collection & Turn Rotation:**
+7. **Winner Pot Collection & Turn Rotation:**
    - Winner takes the entire accumulated pot.
    - Celebration modal announces the winner and pot amount.
    - **Starting Action Rotation:** The next hand automatically begins with the player to the left of the winner (e.g., if $P_3$ wins, $P_4$ starts next hand).
 
-7. **Essential Table Utilities:**
+8. **Essential Table Utilities:**
    - **🔄 Reset Game:** Dedicated 1-click button in the top header to wipe and start a fresh session from scratch (resets all player bankrolls back to 100 chips, resets hand counter to Hand #1, and clears previous hand history).
    - **↺ Undo:** Full undo stack to revert misclicks or mistakes during fast-paced play.
    - **📜 Log:** Live timestamped action audit trail of every bet, fold, raise, and win.
