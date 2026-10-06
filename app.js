@@ -475,12 +475,17 @@
   function handleCallAllIn() {
     if (!state.isHandActive || !state.isAllInActive) return;
     const player = state.players[state.currentTurnIndex];
+    const diff = Math.max(0, state.allInTargetBet - player.currentHandBet);
+
+    // Rule: Player must have enough bankroll to match the All-In call!
+    if (player.chips < diff) {
+      alert(`${player.name} does not have enough bankroll to call the All-In (${diff} chips needed, has ${player.chips} chips). Please Top Up bankroll or Pack.`);
+      return;
+    }
 
     pushUndoSnapshot(`${player.name} Called ALL-IN`);
 
-    const diff = Math.max(0, state.allInTargetBet - player.currentHandBet);
-    const actualCall = Math.min(player.chips, diff);
-
+    const actualCall = diff;
     player.chips -= actualCall;
     player.currentHandBet += actualCall;
     state.pot += actualCall;
@@ -723,8 +728,11 @@
     } else if (state.isAllInActive) {
       const activePlayer = state.players[state.currentTurnIndex];
       const diff = Math.max(0, state.allInTargetBet - activePlayer.currentHandBet);
-      const callAmount = Math.min(activePlayer.chips, diff);
-      bannerText.innerHTML = `🔥 <strong style="color: #f87171;">ALL-IN ROUND:</strong> ${activePlayer.name}'s Turn (Must <strong>PACK</strong> or <strong>CALL +${callAmount} CHIPS</strong>)`;
+      if (activePlayer.chips < diff) {
+        bannerText.innerHTML = `🔥 <strong style="color: #f87171;">ALL-IN ROUND:</strong> ${activePlayer.name}'s Turn (Needs <strong>${diff}</strong> Chips, Has <strong>${activePlayer.chips}</strong> — <strong>PACK</strong> or <strong>ADD BANKROLL</strong>)`;
+      } else {
+        bannerText.innerHTML = `🔥 <strong style="color: #f87171;">ALL-IN ROUND:</strong> ${activePlayer.name}'s Turn (Must <strong>PACK</strong> or <strong>CALL +${diff} CHIPS</strong>)`;
+      }
     } else {
       const activePlayer = state.players[state.currentTurnIndex];
       const req = getRequiredBet(state.currentTurnIndex);
@@ -928,7 +936,7 @@
     const raiseGroup = document.querySelector('.raise-group');
     const btnShow = document.getElementById('btnShow');
 
-    // If All-In is active, user requested ONLY TWO buttons: PACK or CALL ALL-IN!
+    // If All-In is active:
     if (state.isAllInActive) {
       btnFold.style.display = 'inline-flex';
       btnCallAllIn.style.display = 'inline-flex';
@@ -937,13 +945,39 @@
       btnCall.style.display = 'none';
       if (btnAllIn) btnAllIn.style.display = 'none';
       if (raiseGroup) raiseGroup.style.display = 'none';
-      if (topupGroup) topupGroup.style.display = 'none';
       if (btnShow) btnShow.style.display = 'none';
 
       const diff = Math.max(0, state.allInTargetBet - player.currentHandBet);
-      const callAmount = Math.min(player.chips, diff);
-      btnCallAllInSub.textContent = `+${callAmount} Chips`;
-      btnCallAllIn.disabled = false;
+      const hasEnough = player.chips >= diff;
+      const btnCallAllInTop = btnCallAllIn.querySelector('.btn-top');
+
+      if (!hasEnough) {
+        // Player does not have enough bankroll to match the All-In!
+        btnCallAllIn.disabled = true;
+        if (btnCallAllInTop) btnCallAllInTop.textContent = 'LOW CHIPS';
+        btnCallAllInSub.textContent = `Need ${diff}, Have ${player.chips}`;
+
+        // Present option to PACK or ADD BANKROLL
+        topupGroup.style.display = 'inline-flex';
+        const shortage = diff - player.chips;
+        const quickAdd = Math.max(100, shortage);
+        const btnQuickTopUp = document.getElementById('btnQuickTopUp');
+        const btnCustomTopUp = document.getElementById('btnCustomTopUp');
+
+        const quickTopText = btnQuickTopUp.querySelector('.btn-top');
+        const quickSubText = btnQuickTopUp.querySelector('.btn-sub');
+        if (quickTopText) quickTopText.textContent = `+${quickAdd} CHIPS`;
+        if (quickSubText) quickSubText.textContent = `Cover All-In`;
+
+        btnQuickTopUp.onclick = () => addPlayerChips(state.currentTurnIndex, quickAdd);
+        btnCustomTopUp.onclick = () => openTopupModal(state.currentTurnIndex, shortage);
+      } else {
+        // Player has enough bankroll to match the All-In!
+        btnCallAllIn.disabled = false;
+        if (btnCallAllInTop) btnCallAllInTop.textContent = '⚡ CALL ALL-IN';
+        btnCallAllInSub.textContent = `+${diff} Chips`;
+        topupGroup.style.display = 'none';
+      }
       return;
     }
 
@@ -985,8 +1019,14 @@
       topupGroup.style.display = 'inline-flex';
       const btnQuickTopUp = document.getElementById('btnQuickTopUp');
       const btnCustomTopUp = document.getElementById('btnCustomTopUp');
+
+      const quickTopText = btnQuickTopUp.querySelector('.btn-top');
+      const quickSubText = btnQuickTopUp.querySelector('.btn-sub');
+      if (quickTopText) quickTopText.textContent = '+100 CHIPS';
+      if (quickSubText) quickSubText.textContent = 'Add Bankroll';
+
       btnQuickTopUp.onclick = () => addPlayerChips(state.currentTurnIndex, 100);
-      btnCustomTopUp.onclick = () => openTopupModal(state.currentTurnIndex);
+      btnCustomTopUp.onclick = () => openTopupModal(state.currentTurnIndex, 100);
 
       if (raiseGroup) {
         raiseGroup.style.opacity = '0.35';
@@ -1046,31 +1086,46 @@
   // --- Modals Setup & Event Handlers ---
 
   // Top-Up / Add Bankroll Modal
-  function openTopupModal(playerIndex) {
+  function openTopupModal(playerIndex, suggestedMin = 100) {
     const modal = document.getElementById('topupModal');
     const player = state.players[playerIndex];
-    const reqBet = getRequiredBet(playerIndex);
+    let reqBet = getRequiredBet(playerIndex);
+    if (state.isAllInActive) {
+      reqBet = Math.max(0, state.allInTargetBet - player.currentHandBet);
+    }
     const desc = document.getElementById('topupDesc');
     const input = document.getElementById('topupNumberInput');
     const display = document.getElementById('topupAmountDisplay');
     const presets = document.getElementById('topupPresets');
 
-    desc.innerHTML = `<strong>${escapeHtml(player.name)}</strong> has <strong>${player.chips}</strong> chips (needs <strong>${reqBet}</strong> chips to call). Add extra bankroll to continue playing.`;
-    input.value = 100;
+    const defaultTopup = Math.max(100, suggestedMin || (reqBet > player.chips ? reqBet - player.chips : 100));
+
+    if (state.isAllInActive) {
+      desc.innerHTML = `<strong>${escapeHtml(player.name)}</strong> has <strong>${player.chips}</strong> chips (needs <strong>${reqBet}</strong> chips to call All-In). Add extra bankroll to match the All-In bet.`;
+    } else {
+      desc.innerHTML = `<strong>${escapeHtml(player.name)}</strong> has <strong>${player.chips}</strong> chips (needs <strong>${reqBet}</strong> chips to call). Add extra bankroll to continue playing.`;
+    }
+    input.value = defaultTopup;
     input.min = 100;
-    display.textContent = '100';
+    display.textContent = defaultTopup;
 
     input.oninput = () => {
       const val = Math.max(100, parseInt(input.value, 10) || 100);
       display.textContent = val;
     };
 
-    presets.querySelectorAll('button').forEach(btn => {
+    presets.innerHTML = '';
+    const presetAmounts = [defaultTopup, 100, 200, 500, 1000];
+    const uniquePresets = [...new Set(presetAmounts)].filter(v => v >= 100).sort((a, b) => a - b);
+    uniquePresets.forEach(val => {
+      const btn = document.createElement('button');
+      btn.className = 'btn btn-chip-quick';
+      btn.textContent = `+${val}`;
       btn.onclick = () => {
-        const val = parseInt(btn.getAttribute('data-topup'), 10) || 100;
         input.value = val;
         display.textContent = val;
       };
+      presets.appendChild(btn);
     });
 
     document.getElementById('btnConfirmTopup').onclick = () => {
