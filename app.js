@@ -255,6 +255,7 @@
         isBlind: true,
         isFolded: false,
         currentHandBet: 0,
+        currentRoundBet: 0,
         handsWon: 0,
         color: PLAYER_COLORS[i % PLAYER_COLORS.length]
       });
@@ -298,6 +299,7 @@
       p.isBlind = true;
       p.isFolded = false;
       p.currentHandBet = 0;
+      p.currentRoundBet = 0;
 
       const deduction = Math.min(p.chips, boot);
       p.chips -= deduction;
@@ -361,6 +363,7 @@
       state.turnsInCurrentRound = 0;
       if (state.roundNumber < state.config.maxRounds) {
         state.roundNumber++;
+        state.players.forEach(p => { p.currentRoundBet = 0; });
         logAction(`--- Round ${state.roundNumber} of ${state.config.maxRounds} begins ---`, 'round-entry');
       } else {
         // Max rounds (3) reached! Showdown is triggered!
@@ -440,18 +443,19 @@
     const pushAmount = player.chips;
     player.chips = 0;
     player.currentHandBet += pushAmount;
+    player.currentRoundBet = (player.currentRoundBet || 0) + pushAmount;
     state.pot += pushAmount;
 
     state.isAllInActive = true;
     state.allInInitiatorId = player.id;
     state.allInInitiatorName = player.name;
-    state.allInTargetBet = player.currentHandBet;
+    state.allInTargetBet = player.currentRoundBet;
 
     // Remaining active players who must respond (either Pack or Call All-In)
     const pending = state.players.filter(p => !p.isFolded && p.id !== player.id);
     state.allInPendingPlayerIds = pending.map(p => p.id);
 
-    logAction(`🔥 ${player.name} went ALL-IN (+${pushAmount} chips, total bet ${player.currentHandBet})! All remaining players must Call All-In or Pack.`, 'chaal-entry');
+    logAction(`🔥 ${player.name} went ALL-IN (+${pushAmount} chips in Round ${state.roundNumber})! All remaining players must Call All-In or Pack.`, 'chaal-entry');
     sound.playTone(600, 'triangle', 0.25, 0.2);
     setTimeout(() => sound.playTone(900, 'triangle', 0.35, 0.2), 120);
 
@@ -475,7 +479,7 @@
   function handleCallAllIn() {
     if (!state.isHandActive || !state.isAllInActive) return;
     const player = state.players[state.currentTurnIndex];
-    const diff = Math.max(0, state.allInTargetBet - player.currentHandBet);
+    const diff = Math.max(0, state.allInTargetBet - (player.currentRoundBet || 0));
 
     // Rule: Player must have enough bankroll to match the All-In call!
     if (player.chips < diff) {
@@ -488,9 +492,10 @@
     const actualCall = diff;
     player.chips -= actualCall;
     player.currentHandBet += actualCall;
+    player.currentRoundBet = (player.currentRoundBet || 0) + actualCall;
     state.pot += actualCall;
 
-    logAction(`⚡ ${player.name} called ALL-IN (-${actualCall} chips, total bet ${player.currentHandBet})`, 'chaal-entry');
+    logAction(`⚡ ${player.name} called ALL-IN (-${actualCall} chips in Round ${state.roundNumber})`, 'chaal-entry');
     sound.playChipSound();
     animatePotPop();
 
@@ -570,6 +575,7 @@
     const actualDeduction = Math.min(player.chips, amount);
     player.chips -= actualDeduction;
     player.currentHandBet += actualDeduction;
+    player.currentRoundBet = (player.currentRoundBet || 0) + actualDeduction;
     state.pot += actualDeduction;
 
     const actionType = player.isBlind ? 'Blind' : 'Chaal';
@@ -601,6 +607,7 @@
     const actualDeduction = Math.min(player.chips, targetAmount);
     player.chips -= actualDeduction;
     player.currentHandBet += actualDeduction;
+    player.currentRoundBet = (player.currentRoundBet || 0) + actualDeduction;
     state.pot += actualDeduction;
 
     if (player.isBlind) {
@@ -727,7 +734,7 @@
       bannerText.textContent = 'Hand complete. Deal to start next hand!';
     } else if (state.isAllInActive) {
       const activePlayer = state.players[state.currentTurnIndex];
-      const diff = Math.max(0, state.allInTargetBet - activePlayer.currentHandBet);
+      const diff = Math.max(0, state.allInTargetBet - (activePlayer.currentRoundBet || 0));
       if (activePlayer.chips < diff) {
         bannerText.innerHTML = `🔥 <strong style="color: #f87171;">ALL-IN ROUND:</strong> ${activePlayer.name}'s Turn (Needs <strong>${diff}</strong> Chips, Has <strong>${activePlayer.chips}</strong> — <strong>PACK</strong> or <strong>ADD BANKROLL</strong>)`;
       } else {
@@ -947,7 +954,7 @@
       if (raiseGroup) raiseGroup.style.display = 'none';
       if (btnShow) btnShow.style.display = 'none';
 
-      const diff = Math.max(0, state.allInTargetBet - player.currentHandBet);
+      const diff = Math.max(0, state.allInTargetBet - (player.currentRoundBet || 0));
       const hasEnough = player.chips >= diff;
       const btnCallAllInTop = btnCallAllIn.querySelector('.btn-top');
 
@@ -1091,7 +1098,7 @@
     const player = state.players[playerIndex];
     let reqBet = getRequiredBet(playerIndex);
     if (state.isAllInActive) {
-      reqBet = Math.max(0, state.allInTargetBet - player.currentHandBet);
+      reqBet = Math.max(0, state.allInTargetBet - (player.currentRoundBet || 0));
     }
     const desc = document.getElementById('topupDesc');
     const input = document.getElementById('topupNumberInput');
