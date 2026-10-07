@@ -306,7 +306,11 @@
       p.currentHandBet = deduction;
       state.pot += deduction;
 
-      logAction(`${p.name} placed Boot ante (-${deduction} chips)`, 'boot-entry');
+      if (deduction > 0) {
+        logAction(`${p.name} placed Boot ante (-${deduction} chips)`, 'boot-entry');
+      } else {
+        logAction(`⚠️ ${p.name} has 0 chips (Owes Boot ante. Must Add Bankroll or Pack)`, 'fold-entry');
+      }
     });
 
     // Starting turn is the first active player next to dealer
@@ -541,6 +545,35 @@
   }
 
   /**
+   * Automatically synchronizes any unpaid boot antes for active players who have chips.
+   * Ensures players who were added mid-hand or who topped up always have their boot collected.
+   */
+  function syncPendingBootAntes() {
+    if (!state.isHandActive) return false;
+    let anyDeducted = false;
+    const boot = state.config.bootAmount;
+
+    state.players.forEach(p => {
+      if (p.isFolded) return;
+      const currentPaid = p.currentHandBet || 0;
+      const owed = Math.max(0, boot - currentPaid);
+      if (owed > 0 && p.chips > 0) {
+        const deduction = Math.min(p.chips, owed);
+        p.chips -= deduction;
+        p.currentHandBet = currentPaid + deduction;
+        state.pot += deduction;
+        logAction(`🪙 ${p.name} placed Boot ante (-${deduction} chips)`, 'boot-entry');
+        anyDeducted = true;
+      }
+    });
+
+    if (anyDeducted) {
+      animatePotPop();
+    }
+    return anyDeducted;
+  }
+
+  /**
    * Add Chips / Rebuy to Player Bankroll
    * Default & minimum is 100 chips.
    */
@@ -557,6 +590,9 @@
     logAction(`💰 ${player.name} added +${finalAmount} chips (Bankroll now: ${player.chips})`, 'boot-entry');
     sound.playChipSound();
     setTimeout(() => sound.playChipSound(), 120);
+
+    // Auto-collect boot ante if hand is active and player owes boot
+    syncPendingBootAntes();
 
     renderAll();
     saveStateToStorage();
@@ -1419,7 +1455,7 @@
       // Adjust players array
       while (state.players.length < newCount) {
         const i = state.players.length;
-        state.players.push({
+        const newPlayer = {
           id: `P${i + 1}`,
           name: `Player ${i + 1}`,
           chips: newChips,
@@ -1427,12 +1463,31 @@
           isBlind: true,
           isFolded: false,
           currentHandBet: 0,
+          currentRoundBet: 0,
           handsWon: 0,
           color: PLAYER_COLORS[i % PLAYER_COLORS.length]
-        });
+        };
+
+        // If hand is currently active, new player joins the active hand and pays boot ante
+        if (state.isHandActive) {
+          const bootDeduction = Math.min(newPlayer.chips, state.config.bootAmount);
+          newPlayer.chips -= bootDeduction;
+          newPlayer.currentHandBet = bootDeduction;
+          state.pot += bootDeduction;
+          logAction(`➕ ${newPlayer.name} joined table & placed Boot ante (-${bootDeduction} chips)`, 'boot-entry');
+          animatePotPop();
+        }
+
+        state.players.push(newPlayer);
       }
       if (state.players.length > newCount) {
         state.players = state.players.slice(0, newCount);
+        if (state.currentTurnIndex >= state.players.length) {
+          state.currentTurnIndex = 0;
+        }
+        if (state.dealerIndex >= state.players.length) {
+          state.dealerIndex = 0;
+        }
       }
 
       // Update names
@@ -1442,6 +1497,9 @@
           state.players[i].name = nameInp.value.trim();
         }
       }
+
+      // Sync any other pending boot antes
+      syncPendingBootAntes();
 
       modal.style.display = 'none';
       renderAll();
@@ -1649,6 +1707,10 @@
       initializeDefaultPlayers(state.config.numPlayers);
     }
     initEventListeners();
+
+    // Auto-sync any pending boot antes for active players with chips (e.g. restored from storage)
+    syncPendingBootAntes();
+
     renderAll();
 
     // Auto-start hand 1 if no active hand was loaded
