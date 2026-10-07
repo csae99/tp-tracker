@@ -692,6 +692,17 @@
     const player = state.players[state.currentTurnIndex];
     if (player.chips <= 0) return;
 
+    const reqBet = getRequiredBet(state.currentTurnIndex);
+    const isFinalRound = state.roundNumber >= state.config.maxRounds;
+    const isLastTurnOfRound = Array.isArray(state.pendingRoundPlayerIds) && 
+      state.pendingRoundPlayerIds.length === 1 && 
+      state.pendingRoundPlayerIds[0] === player.id;
+
+    if (isFinalRound && isLastTurnOfRound && player.chips > reqBet) {
+      alert(`Cannot raise / go All-In for more than the current call on the final turn of Round 3.`);
+      return;
+    }
+
     pushUndoSnapshot(`${player.name} went ALL-IN`);
 
     const pushAmount = player.chips;
@@ -883,6 +894,17 @@
   function handleRaise(targetAmount) {
     if (!state.isHandActive || state.isShowdownPending) return;
     const player = state.players[state.currentTurnIndex];
+
+    const isFinalRound = state.roundNumber >= state.config.maxRounds;
+    const isLastTurnOfRound = Array.isArray(state.pendingRoundPlayerIds) && 
+      state.pendingRoundPlayerIds.length === 1 && 
+      state.pendingRoundPlayerIds[0] === player.id;
+
+    if (isFinalRound && isLastTurnOfRound) {
+      alert(`Cannot raise on the final turn of Round 3 because the round concludes with Showdown and subsequent players cannot call.`);
+      return;
+    }
+
     const currentRequired = getRequiredBet(state.currentTurnIndex);
 
     // Rule: Next bet/raise must be strictly greater than the current required call
@@ -1045,7 +1067,16 @@
     } else {
       const activePlayer = state.players[state.currentTurnIndex];
       const req = getRequiredBet(state.currentTurnIndex);
-      bannerText.textContent = `${activePlayer.name}'s Turn (Must Call ≥ ${req} Chips)`;
+      const isFinalRound = state.roundNumber >= state.config.maxRounds;
+      const isLastTurnOfRound = Array.isArray(state.pendingRoundPlayerIds) && 
+        state.pendingRoundPlayerIds.length === 1 && 
+        state.pendingRoundPlayerIds[0] === activePlayer.id;
+
+      if (isFinalRound && isLastTurnOfRound) {
+        bannerText.innerHTML = `🏁 <strong style="color: var(--gold-primary);">FINAL TURN OF ROUND ${state.roundNumber}:</strong> ${activePlayer.name}'s Turn (Call ${req} Chips to conclude hand, Pack, or Show)`;
+      } else {
+        bannerText.textContent = `${activePlayer.name}'s Turn (Must Call ≥ ${req} Chips)`;
+      }
     }
   }
 
@@ -1331,11 +1362,27 @@
     if (raiseGroup) raiseGroup.style.display = 'flex';
     if (btnShow) btnShow.style.display = 'inline-flex';
 
+    // Call / Chaal / Blind button & Insufficient Bankroll Top-Up Logic
+    const reqBet = getRequiredBet(state.currentTurnIndex);
+    const hasEnoughChips = player.chips >= reqBet;
+
+    // In the final round (Round 3), the last player on whom the round will conclude cannot raise,
+    // because no subsequent player will have an opportunity to call that raise before showdown.
+    const isFinalRound = state.roundNumber >= state.config.maxRounds;
+    const isLastTurnOfRound = Array.isArray(state.pendingRoundPlayerIds) && 
+      state.pendingRoundPlayerIds.length === 1 && 
+      state.pendingRoundPlayerIds[0] === player.id;
+    const cannotRaiseInFinalRound = isFinalRound && isLastTurnOfRound;
+
     // All-In Button
     if (btnAllIn) {
-      btnAllIn.style.display = 'inline-flex';
-      btnAllIn.disabled = player.chips <= 0;
-      btnAllInSub.textContent = player.chips > 0 ? `+${player.chips} Chips` : '0 Chips';
+      if (cannotRaiseInFinalRound && player.chips > reqBet) {
+        btnAllIn.style.display = 'none';
+      } else {
+        btnAllIn.style.display = 'inline-flex';
+        btnAllIn.disabled = player.chips <= 0;
+        btnAllInSub.textContent = player.chips > 0 ? `+${player.chips} Chips` : '0 Chips';
+      }
     }
 
     // See Cards button: Once seen, cannot un-see cards
@@ -1347,10 +1394,6 @@
       // Once cards are seen, player CANNOT return to blind!
       btnToggleSeen.style.display = 'none';
     }
-
-    // Call / Chaal / Blind button & Insufficient Bankroll Top-Up Logic
-    const reqBet = getRequiredBet(state.currentTurnIndex);
-    const hasEnoughChips = player.chips >= reqBet;
 
     if (!hasEnoughChips) {
       // Player does not have enough bankroll to take the Chaal!
@@ -1384,11 +1427,18 @@
       }
 
       btnCallTop.textContent = player.isBlind ? 'BLIND' : 'CHAAL';
-      if (player.isBlind) {
+      if (cannotRaiseInFinalRound) {
+        btnCallSub.textContent = `+${reqBet} Chips (Concludes Round ${state.roundNumber} ➔ Showdown)`;
+      } else if (player.isBlind) {
         btnCallSub.textContent = `+${reqBet} Chips (½ of ${state.currentBlindStake * 2} Chaal)`;
       } else {
         btnCallSub.textContent = `+${reqBet} Chips (Matches Chaal)`;
       }
+    }
+
+    // Hide raise controls if this player is on the final turn of Round 3
+    if (cannotRaiseInFinalRound && raiseGroup) {
+      raiseGroup.style.display = 'none';
     }
 
     // Show button condition:
