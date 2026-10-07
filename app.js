@@ -149,7 +149,8 @@
         allInInitiatorName: state.allInInitiatorName,
         allInTargetBet: state.allInTargetBet,
         allInPendingPlayerIds: state.allInPendingPlayerIds,
-        isShowdownPending: state.isShowdownPending
+        isShowdownPending: state.isShowdownPending,
+        undoStack: (state.undoStack || []).slice(-30)
       };
       localStorage.setItem(STORAGE_KEY, JSON.stringify(serializable));
     } catch (e) {
@@ -180,6 +181,7 @@
       state.allInTargetBet = data.allInTargetBet || 0;
       state.allInPendingPlayerIds = data.allInPendingPlayerIds || [];
       state.isShowdownPending = data.isShowdownPending || false;
+      state.undoStack = Array.isArray(data.undoStack) ? data.undoStack : [];
       return true;
     } catch (e) {
       console.warn('Could not restore state from storage', e);
@@ -214,10 +216,191 @@
       state.undoStack.shift();
     }
     updateUndoButtonState();
+    saveStateToStorage();
+  }
+
+  function findLastPlayerActionIndex() {
+    if (!state.actionHistory || state.actionHistory.length === 0) return -1;
+    for (let i = 0; i < state.actionHistory.length; i++) {
+      const text = state.actionHistory[i].text;
+      if (text.startsWith('--- Round') || text.startsWith('🏁') || text.startsWith('↺') || text.startsWith('🪙') || text.startsWith('⚠️')) {
+        continue;
+      }
+      return i;
+    }
+    return -1;
+  }
+
+  function canRollbackLastAction() {
+    return findLastPlayerActionIndex() !== -1;
+  }
+
+  function rollbackLastPlayerAction() {
+    const actionIdx = findLastPlayerActionIndex();
+    if (actionIdx === -1) return false;
+
+    const actionText = state.actionHistory[actionIdx].text;
+    let handled = false;
+    let undonePlayerName = '';
+
+    // 1. Blind or Chaal call (e.g. "Player 6 played Blind (-20 chips)")
+    const callMatch = actionText.match(/^(.+?)\s+played\s+(Blind|Chaal)\s+\(-(\d+)\s+chips\)/i);
+    if (callMatch) {
+      const pName = callMatch[1].trim();
+      undonePlayerName = pName;
+      const actionType = callMatch[2];
+      const amount = parseInt(callMatch[3], 10) || 0;
+      const pIdx = state.players.findIndex(p => p.name === pName);
+      if (pIdx !== -1) {
+        const p = state.players[pIdx];
+        p.chips += amount;
+        p.currentHandBet = Math.max(0, (p.currentHandBet || 0) - amount);
+        p.currentRoundBet = Math.max(0, (p.currentRoundBet || 0) - amount);
+        state.pot = Math.max(0, state.pot - amount);
+        if (actionType.toLowerCase() === 'blind') {
+          p.isBlind = true;
+        }
+        state.isShowdownPending = false;
+        state.currentTurnIndex = pIdx;
+        const active = getActivePlayers();
+        state.turnsInCurrentRound = Math.max(0, active.length - 1);
+        handled = true;
+      }
+    }
+
+    // 2. Packed / Folded (e.g. "Player 5 packed (Folded)")
+    if (!handled) {
+      const foldMatch = actionText.match(/^(.+?)\s+packed\s+\(Folded\)/i);
+      if (foldMatch) {
+        const pName = foldMatch[1].trim();
+        undonePlayerName = pName;
+        const pIdx = state.players.findIndex(p => p.name === pName);
+        if (pIdx !== -1) {
+          const p = state.players[pIdx];
+          p.isFolded = false;
+          state.isShowdownPending = false;
+          state.currentTurnIndex = pIdx;
+          const active = getActivePlayers();
+          state.turnsInCurrentRound = Math.max(0, active.length - 1);
+          handled = true;
+        }
+      }
+    }
+
+    // 3. Raised (e.g. "Player 2 RAISED to 20 chips! ...")
+    if (!handled) {
+      const raiseMatch = actionText.match(/^(.+?)\s+RAISED to\s+(\d+)\s+chips!/i);
+      if (raiseMatch) {
+        const pName = raiseMatch[1].trim();
+        undonePlayerName = pName;
+        const amount = parseInt(raiseMatch[2], 10) || 0;
+        const pIdx = state.players.findIndex(p => p.name === pName);
+        if (pIdx !== -1) {
+          const p = state.players[pIdx];
+          p.chips += amount;
+          p.currentHandBet = Math.max(0, (p.currentHandBet || 0) - amount);
+          p.currentRoundBet = Math.max(0, (p.currentRoundBet || 0) - amount);
+          state.pot = Math.max(0, state.pot - amount);
+          state.currentBlindStake = state.config.bootAmount;
+          state.isShowdownPending = false;
+          state.currentTurnIndex = pIdx;
+          const active = getActivePlayers();
+          state.turnsInCurrentRound = Math.max(0, active.length - 1);
+          handled = true;
+        }
+      }
+    }
+
+    // 4. Called All-In (e.g. "⚡ Player 4 called ALL-IN (-45 chips ...)")
+    if (!handled) {
+      const callAllInMatch = actionText.match(/⚡\s*(.+?)\s+called ALL-IN\s+\(-(\d+)\s+chips/i);
+      if (callAllInMatch) {
+        const pName = callAllInMatch[1].trim();
+        undonePlayerName = pName;
+        const amount = parseInt(callAllInMatch[2], 10) || 0;
+        const pIdx = state.players.findIndex(p => p.name === pName);
+        if (pIdx !== -1) {
+          const p = state.players[pIdx];
+          p.chips += amount;
+          p.currentHandBet = Math.max(0, (p.currentHandBet || 0) - amount);
+          p.currentRoundBet = Math.max(0, (p.currentRoundBet || 0) - amount);
+          state.pot = Math.max(0, state.pot - amount);
+          state.isAllInActive = true;
+          if (!state.allInPendingPlayerIds.includes(p.id)) {
+            state.allInPendingPlayerIds.push(p.id);
+          }
+          state.isShowdownPending = false;
+          state.currentTurnIndex = pIdx;
+          handled = true;
+        }
+      }
+    }
+
+    // 5. Went All-In (e.g. "🔥 Player 3 went ALL-IN (+75 chips ...)")
+    if (!handled) {
+      const allInMatch = actionText.match(/🔥\s*(.+?)\s+went ALL-IN\s+\(\+(\d+)\s+chips/i);
+      if (allInMatch) {
+        const pName = allInMatch[1].trim();
+        undonePlayerName = pName;
+        const amount = parseInt(allInMatch[2], 10) || 0;
+        const pIdx = state.players.findIndex(p => p.name === pName);
+        if (pIdx !== -1) {
+          const p = state.players[pIdx];
+          p.chips += amount;
+          p.currentHandBet = Math.max(0, (p.currentHandBet || 0) - amount);
+          p.currentRoundBet = Math.max(0, (p.currentRoundBet || 0) - amount);
+          state.pot = Math.max(0, state.pot - amount);
+          state.isAllInActive = false;
+          state.allInInitiatorId = null;
+          state.allInInitiatorName = null;
+          state.allInTargetBet = 0;
+          state.allInPendingPlayerIds = [];
+          state.isShowdownPending = false;
+          state.currentTurnIndex = pIdx;
+          const active = getActivePlayers();
+          state.turnsInCurrentRound = Math.max(0, active.length - 1);
+          handled = true;
+        }
+      }
+    }
+
+    // 6. Looked at cards
+    if (!handled) {
+      const seenMatch = actionText.match(/^(.+?)\s+looked at cards \(Now Seen \/ Chaal\)/i);
+      if (seenMatch) {
+        const pName = seenMatch[1].trim();
+        undonePlayerName = pName;
+        const pIdx = state.players.findIndex(p => p.name === pName);
+        if (pIdx !== -1) {
+          const p = state.players[pIdx];
+          p.isBlind = true;
+          state.isShowdownPending = false;
+          state.currentTurnIndex = pIdx;
+          handled = true;
+        }
+      }
+    }
+
+    if (handled) {
+      state.actionHistory.splice(0, actionIdx + 1);
+      logAction(`↺ Undid last action: ${undonePlayerName}'s turn restored`, 'round-entry');
+      sound.playTone(400, 'triangle', 0.12, 0.1);
+      renderAll();
+      saveStateToStorage();
+      updateUndoButtonState();
+      return true;
+    }
+
+    return false;
   }
 
   function performUndo() {
-    if (state.undoStack.length === 0) return;
+    if (state.undoStack.length === 0) {
+      if (rollbackLastPlayerAction()) {
+        return;
+      }
+      return;
+    }
     const snapshot = state.undoStack.pop();
     
     state.handNumber = snapshot.handNumber;
@@ -244,9 +427,14 @@
   }
 
   function updateUndoButtonState() {
+    const canUndo = state.undoStack.length > 0 || (state.isHandActive && canRollbackLastAction());
     const btnUndo = document.getElementById('btnUndo');
     if (btnUndo) {
-      btnUndo.disabled = state.undoStack.length === 0;
+      btnUndo.disabled = !canUndo;
+    }
+    const btnUndoFromWinner = document.getElementById('btnUndoFromWinnerModal');
+    if (btnUndoFromWinner) {
+      btnUndoFromWinner.disabled = !canUndo;
     }
   }
 
@@ -1320,6 +1508,7 @@
     const modal = document.getElementById('winnerModal');
     const list = document.getElementById('winnerPlayerList');
     document.getElementById('winnerPotAmount').textContent = state.pot;
+    updateUndoButtonState();
 
     list.innerHTML = '';
     activePlayers.forEach(p => {
@@ -1713,7 +1902,10 @@
       btnUndoFromWinner.addEventListener('click', () => {
         document.getElementById('winnerModal').style.display = 'none';
         state.isShowdownPending = false;
-        performUndo();
+        const undone = performUndo();
+        if (!undone) {
+          renderAll();
+        }
       });
     }
 
