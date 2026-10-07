@@ -119,6 +119,9 @@
     allInTargetBet: 0,
     allInPendingPlayerIds: [],
 
+    // Showdown Pending State (Max rounds reached or Showdown triggered)
+    isShowdownPending: false,
+
     // Undo Stack
     undoStack: []
   };
@@ -145,7 +148,8 @@
         allInInitiatorId: state.allInInitiatorId,
         allInInitiatorName: state.allInInitiatorName,
         allInTargetBet: state.allInTargetBet,
-        allInPendingPlayerIds: state.allInPendingPlayerIds
+        allInPendingPlayerIds: state.allInPendingPlayerIds,
+        isShowdownPending: state.isShowdownPending
       };
       localStorage.setItem(STORAGE_KEY, JSON.stringify(serializable));
     } catch (e) {
@@ -175,6 +179,7 @@
       state.allInInitiatorName = data.allInInitiatorName || null;
       state.allInTargetBet = data.allInTargetBet || 0;
       state.allInPendingPlayerIds = data.allInPendingPlayerIds || [];
+      state.isShowdownPending = data.isShowdownPending || false;
       return true;
     } catch (e) {
       console.warn('Could not restore state from storage', e);
@@ -199,6 +204,7 @@
       allInInitiatorName: state.allInInitiatorName,
       allInTargetBet: state.allInTargetBet,
       allInPendingPlayerIds: [...(state.allInPendingPlayerIds || [])],
+      isShowdownPending: state.isShowdownPending,
       players: JSON.parse(JSON.stringify(state.players)),
       actionHistory: JSON.parse(JSON.stringify(state.actionHistory))
     };
@@ -227,6 +233,7 @@
     state.allInInitiatorName = snapshot.allInInitiatorName || null;
     state.allInTargetBet = snapshot.allInTargetBet || 0;
     state.allInPendingPlayerIds = snapshot.allInPendingPlayerIds || [];
+    state.isShowdownPending = snapshot.isShowdownPending || false;
     state.players = snapshot.players;
     state.actionHistory = snapshot.actionHistory;
 
@@ -286,8 +293,9 @@
       state.dealerIndex = (explicitFirstPlayerIndex - 1 + state.players.length) % state.players.length;
     }
 
-    // Reset All-In state
+    // Reset All-In & Showdown state
     state.isAllInActive = false;
+    state.isShowdownPending = false;
     state.allInInitiatorId = null;
     state.allInInitiatorName = null;
     state.allInTargetBet = 0;
@@ -364,15 +372,18 @@
 
     // When all active players have taken an action in this round, advance round
     if (state.turnsInCurrentRound >= active.length) {
-      state.turnsInCurrentRound = 0;
       if (state.roundNumber < state.config.maxRounds) {
+        state.turnsInCurrentRound = 0;
         state.roundNumber++;
         state.players.forEach(p => { p.currentRoundBet = 0; });
         logAction(`--- Round ${state.roundNumber} of ${state.config.maxRounds} begins ---`, 'round-entry');
       } else {
-        // Max rounds (3) reached! Showdown is triggered!
-        logAction(`Max rounds reached! Triggering Showdown...`, 'round-entry');
-        triggerShowdown();
+        // Max rounds (Round 3) reached! Conclude hand with Showdown (No 4th round allowed!)
+        logAction(`🏁 Max rounds (${state.config.maxRounds}) reached! Concluding hand with Showdown.`, 'round-entry');
+        state.isShowdownPending = true;
+        renderAll();
+        saveStateToStorage();
+        triggerShowdown('Max rounds (Round 3) reached');
         return;
       }
     }
@@ -388,7 +399,7 @@
    * Pack / Fold: Player drops out of the current hand
    */
   function handleFold() {
-    if (!state.isHandActive) return;
+    if (!state.isHandActive || state.isShowdownPending) return;
     const player = state.players[state.currentTurnIndex];
     
     pushUndoSnapshot(`${player.name} Folded`);
@@ -417,7 +428,10 @@
         } else {
           logAction(`🏁 All active players have responded to All-In. Final Showdown!`, 'round-entry');
           state.isAllInActive = false;
-          triggerShowdown();
+          state.isShowdownPending = true;
+          renderAll();
+          saveStateToStorage();
+          triggerShowdown('All-In Round Concluded');
         }
         return;
       }
@@ -438,7 +452,7 @@
    * Once all remaining active players respond, no further rounds occur—Showdown is triggered!
    */
   function handleAllIn() {
-    if (!state.isHandActive || state.isAllInActive) return;
+    if (!state.isHandActive || state.isAllInActive || state.isShowdownPending) return;
     const player = state.players[state.currentTurnIndex];
     if (player.chips <= 0) return;
 
@@ -481,7 +495,7 @@
    * Call All-In: Matches the All-In target bet
    */
   function handleCallAllIn() {
-    if (!state.isHandActive || !state.isAllInActive) return;
+    if (!state.isHandActive || !state.isAllInActive || state.isShowdownPending) return;
     const player = state.players[state.currentTurnIndex];
     const diff = Math.max(0, state.allInTargetBet - (player.currentRoundBet || 0));
 
@@ -515,7 +529,10 @@
       } else {
         logAction(`🏁 All active players have responded to All-In. Concluding final round with Showdown!`, 'round-entry');
         state.isAllInActive = false;
-        triggerShowdown();
+        state.isShowdownPending = true;
+        renderAll();
+        saveStateToStorage();
+        triggerShowdown('All-In Round Concluded');
       }
       return;
     }
@@ -532,7 +549,7 @@
    * Once a player has seen cards, they CANNOT return to Blind for the rest of the hand.
    */
   function handleSeeCards() {
-    if (!state.isHandActive) return;
+    if (!state.isHandActive || state.isShowdownPending) return;
     const player = state.players[state.currentTurnIndex];
     if (!player.isBlind) return; // Cannot un-see cards
     
@@ -602,7 +619,7 @@
    * Call / Chaal / Blind: Matches current table stake
    */
   function handleCall() {
-    if (!state.isHandActive) return;
+    if (!state.isHandActive || state.isShowdownPending) return;
     const player = state.players[state.currentTurnIndex];
     const amount = getRequiredBet(state.currentTurnIndex);
 
@@ -628,7 +645,7 @@
    * It cannot be less than or equal to the previous call.
    */
   function handleRaise(targetAmount) {
-    if (!state.isHandActive) return;
+    if (!state.isHandActive || state.isShowdownPending) return;
     const player = state.players[state.currentTurnIndex];
     const currentRequired = getRequiredBet(state.currentTurnIndex);
 
@@ -666,7 +683,10 @@
    * Showdown:
    * When 2 players remain or Round 3 ends, players show cards and winner is selected.
    */
-  function triggerShowdown() {
+  function triggerShowdown(reason = 'Showdown') {
+    state.isShowdownPending = true;
+    renderAll();
+    saveStateToStorage();
     const active = getActivePlayers();
     openWinnerModal(active);
   }
@@ -681,6 +701,7 @@
     winner.handsWon++;
     state.isHandActive = false;
     state.isAllInActive = false;
+    state.isShowdownPending = false;
     state.allInInitiatorId = null;
     state.allInInitiatorName = null;
     state.allInTargetBet = 0;
@@ -768,6 +789,15 @@
     const bannerText = document.getElementById('turnBannerText');
     if (!state.isHandActive) {
       bannerText.textContent = 'Hand complete. Deal to start next hand!';
+    } else if (state.isShowdownPending) {
+      bannerText.innerHTML = `🏁 <strong style="color: var(--gold-primary);">ROUND ${state.roundNumber} COMPLETE:</strong> Hand is at Showdown! <a href="javascript:void(0)" id="linkShowdownBanner" style="color: #fde047; text-decoration: underline; margin-left: 6px; cursor: pointer; font-weight: 700;">Select Winner (${state.pot} Chips Pot) ➔</a>`;
+      const link = document.getElementById('linkShowdownBanner');
+      if (link) {
+        link.onclick = (e) => {
+          e.preventDefault();
+          openWinnerModal(getActivePlayers());
+        };
+      }
     } else if (state.isAllInActive) {
       const activePlayer = state.players[state.currentTurnIndex];
       const diff = Math.max(0, state.allInTargetBet - (activePlayer.currentRoundBet || 0));
@@ -979,6 +1009,40 @@
     const raiseGroup = document.querySelector('.raise-group');
     const btnShow = document.getElementById('btnShow');
 
+    // If Showdown is Pending (Max Rounds reached or Showdown triggered)
+    if (state.isShowdownPending) {
+      btnFold.style.display = 'none';
+      btnToggleSeen.style.display = 'none';
+      btnCall.style.display = 'none';
+      if (btnAllIn) btnAllIn.style.display = 'none';
+      if (btnCallAllIn) btnCallAllIn.style.display = 'none';
+      if (raiseGroup) raiseGroup.style.display = 'none';
+      if (topupGroup) topupGroup.style.display = 'none';
+
+      // Show the prominent Showdown / Select Winner button
+      if (btnShow) {
+        btnShow.style.display = 'inline-flex';
+        btnShow.disabled = false;
+        const btnShowTop = btnShow.querySelector('.btn-top');
+        const btnShowSub = document.getElementById('btnShowSub');
+        if (btnShowTop) btnShowTop.textContent = '🏆 SELECT WINNER';
+        if (btnShowSub) btnShowSub.textContent = `Award ${state.pot} Chips Pot`;
+      }
+
+      const avatar = document.getElementById('dockPlayerAvatar');
+      avatar.textContent = '🏆';
+      avatar.style.backgroundColor = 'var(--gold-primary)';
+      avatar.style.color = '#000';
+
+      document.getElementById('dockPlayerName').textContent = 'Hand Showdown';
+      document.getElementById('dockPlayerChips').textContent = `Main Pot: ${state.pot} Chips`;
+
+      const dockStatus = document.getElementById('dockPlayerStatus');
+      dockStatus.textContent = `Round ${state.roundNumber} Ended`;
+      dockStatus.className = 'badge badge-seen';
+      return;
+    }
+
     // If All-In is active:
     if (state.isAllInActive) {
       btnFold.style.display = 'inline-flex';
@@ -1094,12 +1158,16 @@
     // Show button condition:
     // Can show when only 2 players remain or in round 3
     const activePlayers = getActivePlayers();
-    if (activePlayers.length <= 2 || state.roundNumber >= state.config.maxRounds) {
-      btnShow.disabled = false;
-      document.getElementById('btnShowSub').textContent = `Showdown (${activePlayers.length} left)`;
-    } else {
-      btnShow.disabled = true;
-      document.getElementById('btnShowSub').textContent = `Need <= 2 players`;
+    if (btnShow) {
+      const btnShowTop = btnShow.querySelector('.btn-top');
+      if (btnShowTop) btnShowTop.textContent = 'SHOW';
+      if (activePlayers.length <= 2 || state.roundNumber >= state.config.maxRounds) {
+        btnShow.disabled = false;
+        document.getElementById('btnShowSub').textContent = `Showdown (${activePlayers.length} left)`;
+      } else {
+        btnShow.disabled = true;
+        document.getElementById('btnShowSub').textContent = `Need <= 2 players`;
+      }
     }
 
     // Quick raise chips with exact target amounts (always strictly higher than current call)
@@ -1627,12 +1695,27 @@
       document.getElementById('raiseModal').style.display = 'none';
     });
 
-    document.getElementById('closeWinnerModal').addEventListener('click', () => {
+    const handleCloseWinnerModal = () => {
       document.getElementById('winnerModal').style.display = 'none';
-    });
-    document.getElementById('btnCancelWinnerModal').addEventListener('click', () => {
-      document.getElementById('winnerModal').style.display = 'none';
-    });
+      // If showdown was manually opened in round 1 or 2 with <= 2 players, allow closing back to normal turn
+      if (state.isHandActive && state.roundNumber < state.config.maxRounds && !state.isAllInActive) {
+        state.isShowdownPending = false;
+      }
+      renderAll();
+      saveStateToStorage();
+    };
+
+    document.getElementById('closeWinnerModal').addEventListener('click', handleCloseWinnerModal);
+    document.getElementById('btnCancelWinnerModal').addEventListener('click', handleCloseWinnerModal);
+
+    const btnUndoFromWinner = document.getElementById('btnUndoFromWinnerModal');
+    if (btnUndoFromWinner) {
+      btnUndoFromWinner.addEventListener('click', () => {
+        document.getElementById('winnerModal').style.display = 'none';
+        state.isShowdownPending = false;
+        performUndo();
+      });
+    }
 
     document.getElementById('closeHistoryModal').addEventListener('click', () => {
       document.getElementById('historyModal').style.display = 'none';
@@ -1671,7 +1754,9 @@
         // Space or C = Call / Chaal / Call All-In
         e.preventDefault();
         if (state.isHandActive) {
-          if (state.isAllInActive) {
+          if (state.isShowdownPending) {
+            openWinnerModal(getActivePlayers());
+          } else if (state.isAllInActive) {
             handleCallAllIn();
           } else {
             handleCall();
@@ -1680,11 +1765,11 @@
       } else if (e.key === 'f' || e.key === 'F') {
         // F = Fold / Pack
         e.preventDefault();
-        if (state.isHandActive) handleFold();
+        if (state.isHandActive && !state.isShowdownPending) handleFold();
       } else if (e.key === 's' || e.key === 'S') {
         // S = See cards (only if blind and NOT during All-In)
         e.preventDefault();
-        if (state.isHandActive && !state.isAllInActive && state.players[state.currentTurnIndex].isBlind) {
+        if (state.isHandActive && !state.isAllInActive && !state.isShowdownPending && state.players[state.currentTurnIndex].isBlind) {
           handleSeeCards();
         }
       } else if (e.key === 'z' && (e.ctrlKey || e.metaKey)) {
@@ -1710,6 +1795,11 @@
 
     // Auto-sync any pending boot antes for active players with chips (e.g. restored from storage)
     syncPendingBootAntes();
+
+    // If an existing game is loaded where Round 3 has ended, ensure showdown state is active
+    if (state.isHandActive && state.roundNumber >= state.config.maxRounds && state.turnsInCurrentRound === 0) {
+      state.isShowdownPending = true;
+    }
 
     renderAll();
 
