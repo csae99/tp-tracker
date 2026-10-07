@@ -110,6 +110,7 @@
     roundNumber: 1,
     currentTurnIndex: 0,
     turnsInCurrentRound: 0,
+    pendingRoundPlayerIds: [],
     actionHistory: [], // actions in the current hand
 
     // All-In State
@@ -143,6 +144,7 @@
         roundNumber: state.roundNumber,
         currentTurnIndex: state.currentTurnIndex,
         turnsInCurrentRound: state.turnsInCurrentRound,
+        pendingRoundPlayerIds: state.pendingRoundPlayerIds || [],
         actionHistory: state.actionHistory,
         isAllInActive: state.isAllInActive,
         allInInitiatorId: state.allInInitiatorId,
@@ -174,6 +176,7 @@
       state.roundNumber = data.roundNumber || 1;
       state.currentTurnIndex = data.currentTurnIndex || 0;
       state.turnsInCurrentRound = data.turnsInCurrentRound || 0;
+      state.pendingRoundPlayerIds = Array.isArray(data.pendingRoundPlayerIds) ? data.pendingRoundPlayerIds : [];
       state.actionHistory = data.actionHistory || [];
       state.isAllInActive = data.isAllInActive || false;
       state.allInInitiatorId = data.allInInitiatorId || null;
@@ -201,6 +204,7 @@
       roundNumber: state.roundNumber,
       currentTurnIndex: state.currentTurnIndex,
       turnsInCurrentRound: state.turnsInCurrentRound,
+      pendingRoundPlayerIds: [...(state.pendingRoundPlayerIds || [])],
       isAllInActive: state.isAllInActive,
       allInInitiatorId: state.allInInitiatorId,
       allInInitiatorName: state.allInInitiatorName,
@@ -382,6 +386,16 @@
     }
 
     if (handled) {
+      if (typeof pIdx !== 'undefined' && pIdx !== -1) {
+        const pId = state.players[pIdx].id;
+        if (!state.pendingRoundPlayerIds.includes(pId)) {
+          state.pendingRoundPlayerIds.unshift(pId);
+        }
+      }
+      const hadRoundAdvance = state.actionHistory.slice(0, actionIdx + 1).some(entry => entry.text && entry.text.includes('begins'));
+      if (hadRoundAdvance) {
+        state.roundNumber = Math.max(1, state.roundNumber - 1);
+      }
       state.actionHistory.splice(0, actionIdx + 1);
       logAction(`↺ Undid last action: ${undonePlayerName}'s turn restored`, 'round-entry');
       sound.playTone(400, 'triangle', 0.12, 0.1);
@@ -411,6 +425,7 @@
     state.roundNumber = snapshot.roundNumber;
     state.currentTurnIndex = snapshot.currentTurnIndex;
     state.turnsInCurrentRound = snapshot.turnsInCurrentRound;
+    state.pendingRoundPlayerIds = Array.isArray(snapshot.pendingRoundPlayerIds) ? [...snapshot.pendingRoundPlayerIds] : [];
     state.isAllInActive = snapshot.isAllInActive || false;
     state.allInInitiatorId = snapshot.allInInitiatorId || null;
     state.allInInitiatorName = snapshot.allInInitiatorName || null;
@@ -511,10 +526,26 @@
 
     // Starting turn is the first active player next to dealer
     state.currentTurnIndex = getNextActivePlayerIndex(state.dealerIndex);
+    initPendingRoundPlayers();
 
     sound.playChipSound();
     renderAll();
     saveStateToStorage();
+  }
+
+  function initPendingRoundPlayers() {
+    const startIdx = getNextActivePlayerIndex(state.dealerIndex);
+    const n = state.players.length;
+    const list = [];
+    for (let i = 0; i < n; i++) {
+      const idx = (startIdx + i) % n;
+      const p = state.players[idx];
+      if (p && !p.isFolded) {
+        list.push(p.id);
+      }
+    }
+    state.pendingRoundPlayerIds = list;
+    state.turnsInCurrentRound = 0;
   }
 
   function getActivePlayers() {
@@ -553,17 +584,31 @@
       return;
     }
 
-    // Advance to next active player
-    const prevTurn = state.currentTurnIndex;
-    state.currentTurnIndex = getNextActivePlayerIndex(prevTurn);
+    // Ensure pending list is initialized if missing
+    if (!Array.isArray(state.pendingRoundPlayerIds) || state.pendingRoundPlayerIds.length === 0) {
+      initPendingRoundPlayers();
+    }
+
+    // Remove acting player from current round pending list
+    const actingPlayer = state.players[state.currentTurnIndex];
+    if (actingPlayer) {
+      state.pendingRoundPlayerIds = state.pendingRoundPlayerIds.filter(id => id !== actingPlayer.id);
+    }
+    // Also remove any players who have folded
+    state.pendingRoundPlayerIds = state.pendingRoundPlayerIds.filter(id => {
+      const p = state.players.find(x => x.id === id);
+      return p && !p.isFolded;
+    });
+
     state.turnsInCurrentRound++;
 
     // When all active players have taken an action in this round, advance round
-    if (state.turnsInCurrentRound >= active.length) {
+    if (state.pendingRoundPlayerIds.length === 0) {
       if (state.roundNumber < state.config.maxRounds) {
-        state.turnsInCurrentRound = 0;
         state.roundNumber++;
         state.players.forEach(p => { p.currentRoundBet = 0; });
+        state.currentTurnIndex = getNextActivePlayerIndex(state.dealerIndex);
+        initPendingRoundPlayers();
         logAction(`--- Round ${state.roundNumber} of ${state.config.maxRounds} begins ---`, 'round-entry');
       } else {
         // Max rounds (Round 3) reached! Conclude hand with Showdown (No 4th round allowed!)
@@ -574,6 +619,9 @@
         triggerShowdown('Max rounds (Round 3) reached');
         return;
       }
+    } else {
+      // Advance to next active player
+      state.currentTurnIndex = getNextActivePlayerIndex(state.currentTurnIndex);
     }
 
     sound.playTurnBell();
@@ -1814,6 +1862,7 @@
     state.sessionHistory = [];
     state.actionHistory = [];
     state.undoStack = [];
+    state.pendingRoundPlayerIds = [];
 
     logAction(`Game reset to factory start (${numPlayers} players with ${startingChips} chips each).`, 'win-entry');
     startNewHand();
